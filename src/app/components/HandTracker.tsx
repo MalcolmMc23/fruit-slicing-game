@@ -18,9 +18,42 @@ export default function HandTracker({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const cameraRef = useRef<Camera | null>(null);
+  const handsModelRef = useRef<Hands | null>(null);
+  const mountedRef = useRef(true);
+
+  // Complete cleanup function
+  const cleanup = () => {
+    if (cameraRef.current) {
+      try {
+        cameraRef.current.stop();
+      } catch (e) {
+        console.error("Error stopping camera:", e);
+      }
+      cameraRef.current = null;
+    }
+
+    if (handsModelRef.current) {
+      try {
+        handsModelRef.current.close();
+      } catch (e) {
+        console.error("Error closing hands model:", e);
+      }
+      handsModelRef.current = null;
+    }
+  };
+
+  // Execute cleanup on unmount
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      cleanup();
+    };
+  }, []);
 
   useEffect(() => {
-    if (!videoRef.current || !canvasRef.current) return;
+    if (!videoRef.current || !canvasRef.current || !mountedRef.current) return;
 
     const video = videoRef.current;
     const canvas = canvasRef.current;
@@ -31,27 +64,29 @@ export default function HandTracker({
       return;
     }
 
-    let handsModel: Hands | null = null;
-    let camera: Camera | null = null;
+    // Clean up any existing instances first
+    cleanup();
 
     async function initHands() {
       try {
+        if (!mountedRef.current) return;
+
         // Initialize MediaPipe Hands
-        handsModel = new Hands({
+        handsModelRef.current = new Hands({
           locateFile: (file: string) => {
             return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
           },
         });
 
-        handsModel.setOptions({
+        handsModelRef.current.setOptions({
           maxNumHands: 2,
           modelComplexity: 1,
           minDetectionConfidence: 0.5,
           minTrackingConfidence: 0.5,
         });
 
-        handsModel.onResults((results: Results) => {
-          if (!canvas || !ctx) return;
+        handsModelRef.current.onResults((results: Results) => {
+          if (!canvas || !ctx || !mountedRef.current) return;
 
           // Set canvas dimensions to match video
           canvas.width = video.videoWidth;
@@ -66,14 +101,15 @@ export default function HandTracker({
             ctx.save();
             ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-            // Draw the video feed to the canvas
-            ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+            // Use a semi-transparent black background for the stick figure
+            ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
 
             for (const landmarks of results.multiHandLandmarks) {
               // Draw connectors
               drawConnectors(ctx, landmarks, HAND_CONNECTIONS, {
                 color: "#00FF00",
-                lineWidth: 3,
+                lineWidth: 4,
               });
 
               // Draw landmarks
@@ -88,26 +124,41 @@ export default function HandTracker({
           }
 
           // Call callback with hand results
-          if (onHandsDetected) {
+          if (onHandsDetected && mountedRef.current) {
             onHandsDetected(results);
           }
 
-          setIsLoading(false);
+          if (mountedRef.current) {
+            setIsLoading(false);
+          }
         });
 
         // Initialize camera
-        camera = new Camera(video, {
+        if (!mountedRef.current) return;
+
+        cameraRef.current = new Camera(video, {
           onFrame: async () => {
-            if (handsModel) {
-              await handsModel.send({ image: video });
+            if (handsModelRef.current && mountedRef.current) {
+              try {
+                await handsModelRef.current.send({ image: video });
+              } catch (e) {
+                // Ignore errors if component is unmounting
+                if (mountedRef.current) {
+                  console.error("Error sending frame to hands model:", e);
+                }
+              }
             }
           },
           width: 640,
           height: 480,
         });
 
-        camera.start();
+        if (mountedRef.current) {
+          await cameraRef.current.start();
+        }
       } catch (err) {
+        if (!mountedRef.current) return;
+
         if (err instanceof Error) {
           setError(err.message);
         } else {
@@ -117,21 +168,21 @@ export default function HandTracker({
       }
     }
 
-    initHands();
+    // Only initialize if component is still mounted
+    if (mountedRef.current) {
+      initHands();
+    }
 
     // Cleanup function
-    return () => {
-      if (camera) {
-        camera.stop();
-      }
-      if (handsModel) {
-        handsModel.close();
-      }
-    };
+    return cleanup;
   }, [onHandsDetected, showOverlay]);
 
   return (
-    <div className="relative">
+    <div
+      id="hand-tracker-container"
+      className="relative w-full h-auto"
+      style={{ overflow: "hidden" }}
+    >
       {isLoading && (
         <div className="absolute inset-0 bg-black/50 flex items-center justify-center text-white z-10">
           <p>Loading hand detection...</p>
@@ -144,18 +195,18 @@ export default function HandTracker({
         </div>
       )}
 
-      <div className="relative w-full h-full">
+      <div className="relative" style={{ aspectRatio: "4/3" }}>
         <video
           ref={videoRef}
-          className="w-full h-full rounded-lg hidden"
+          className="w-full h-full rounded-lg"
           playsInline
           autoPlay
           muted
-          style={{ transform: "scaleX(-1)" }}
+          style={{ transform: "scaleX(-1)", display: "none" }}
         />
         <canvas
           ref={canvasRef}
-          className="w-full h-full rounded-lg pointer-events-none"
+          className="w-full h-full rounded-lg pointer-events-none absolute top-0 left-0"
           style={{ transform: "scaleX(-1)" }}
         />
       </div>
